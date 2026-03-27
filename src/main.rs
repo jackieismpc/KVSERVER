@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;// 共享引用计数，线程安全
 
 // 提供异步功能的库，AsyncBufReadExt: 异步读取行，AsyncWriteExt: 异步写入数据，BufReader: 缓冲读取器
@@ -6,81 +5,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 // 提供异步网络功能的库，TcpListener: 监听TCP连接，TcpStream: TCP连接
 use tokio::net::{TcpListener, TcpStream};
-// 提供异步读写锁，RwLock: 读写锁，允许多个读者或一个写者
-use tokio::sync::RwLock;
-use std::hash::{Hash, Hasher};
+use kvserver::ShardedDb;
 
-type ValueCell = Arc<RwLock<Vec<u8>>>;
-
-
-// 最小的分片数据库实现，使用异步读写锁保护每个分片的哈希表
-struct Shard {
-    map: RwLock<HashMap<String, ValueCell>>,
-}
-// 分片数据库，包含多个分片，每个分片独立管理一部分数据
-struct ShardedDb {
-    shards: Vec<Arc<Shard>>,
-}
-
-impl ShardedDb {
-    fn new(shard_count: usize) -> Self {
-        let mut shards = Vec::with_capacity(shard_count);
-        for _ in 0..shard_count {
-            shards.push(Arc::new(Shard {
-                map: RwLock::new(HashMap::new()),
-            }));
-        }
-        Self { shards }
-    }
-
-    fn shard_for(&self, key: &str) -> Arc<Shard> {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new(); // 使用默认的哈希算法计算键的哈希值
-        key.hash(&mut hasher); // 将键哈希到一个整数值
-        let idx = (hasher.finish() as usize) % self.shards.len(); // 根据哈希值计算分片索引
-        self.shards[idx].clone()
-    }
-
-    async fn get(&self, key: &str) -> Option<Vec<u8>> {
-        let shard = self.shard_for(key);// 获取键所在的分片
-        // 先短暂读取分片 map 拿到 key 对应的 cell，再在 cell 上读，避免长期持有分片锁。
-        let cell = {
-            let guard = shard.map.read().await;// 异步获取分片的读锁
-            guard.get(key).cloned()
-        };
-
-        match cell {
-            Some(cell) => {
-                let value_guard = cell.read().await;
-                Some(value_guard.clone())
-            }
-            None => None,
-        }
-    }
-
-    async fn put(&self, key: String, value: Vec<u8>) {
-        let shard = self.shard_for(&key);
-        // 常见更新路径先尝试读锁查找，命中后只锁该 key 的 cell。
-        let existing_cell = {
-            let guard = shard.map.read().await;
-            guard.get(&key).cloned()
-        };
-
-        if let Some(cell) = existing_cell {
-            let mut value_guard = cell.write().await;
-            *value_guard = value;
-            return;
-        }
-
-        let mut guard = shard.map.write().await;
-        guard.insert(key, Arc::new(RwLock::new(value)));
-    }
-
-    async fn delete(&self, key: &str) -> bool {
-        let shard = self.shard_for(key);
-        let mut guard = shard.map.write().await;
-        guard.remove(key).is_some()
-    }
-}
 type Db = Arc<ShardedDb>;
 
 /// 定义一个枚举，表示支持的命令类型
